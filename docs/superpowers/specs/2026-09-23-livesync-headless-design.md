@@ -23,6 +23,7 @@ This repository is an **ops wrapper**, not a protocol implementation. Upstream's
 - Reproducible installs pinned to an exact upstream tag
 - Healthcheck script (cron-able)
 - Update procedure (explicit, never automatic)
+- **Read-only mode for testing**: pull remote → local files with a hard server-side guarantee that nothing is ever written to the remote DB (see §7a)
 
 ### Out of scope (v1)
 
@@ -52,7 +53,9 @@ livesync-headless/
 │   ├── bootstrap.sh          # clone upstream at pin into UPSTREAM_DIR, npm install, build CLI
 │   ├── install.sh            # configure settings (if missing) + run upstream deploy/install.sh
 │   ├── update.sh             # re-read pin, fetch, rebuild, reinstall, restart service
-│   └── verify.sh             # healthcheck; non-zero exit on failure
+│   ├── verify.sh             # healthcheck; non-zero exit on failure
+│   ├── couchdb-readonly.sh   # on|off: install/remove CouchDB write-guard design doc (read-only mode)
+│   └── readonly-loop.sh      # pull-only sync+mirror loop used by the read-only service
 ├── config/
 │   ├── settings.example.json # template; secrets replaced at install time
 │   └── env.example           # server-specific paths & options, copied to config/env.local (gitignored)
@@ -118,7 +121,8 @@ The vault path is configurable — never hard-coded. Resolution order (highest w
 ### install.sh
 1. Run `bootstrap.sh` if `UPSTREAM_DIR` is missing
 2. If `~/vault/.livesync/settings.json` missing: create from template, fill secrets (prompt or env), set `isConfigured: true`, `chmod 0600`, run one `sync` cycle to validate credentials before enabling the service
-3. Run upstream `deploy/install.sh --user --vault "$VAULT_DIR"` (no `--interval` → LiveSync mode unless `SYNC_INTERVAL` set)4. Report service status
+3. Run upstream `deploy/install.sh --user --vault "$VAULT_DIR"` (no `--interval` → LiveSync mode unless `SYNC_INTERVAL` set)
+4. Report service status
 
 ### update.sh
 1. Require the new pin to differ from the installed one; show pin diff
@@ -132,6 +136,32 @@ Checks; hard failures exit non-zero, warnings do not:
 2. (hard) Settings sanity: `isConfigured: true`, `usePathObfuscation: true`; `encrypt: true` is hard unless `--allow-plaintext` is passed (then warn)
 3. (hard) `livesync-cli "$VAULT_DIR" ls` returns successfully (daemon ↔ local DB alive)
 4. (warn) Journal scan: errors in the last `journalctl --user -u livesync-cli` lines
+
+### 7a. Read-only mode (testing)
+
+Motivation: test the headless setup against the real CouchDB with a hard guarantee that nothing is ever written to the remote DB. Upstream cannot provide this client-side — its `sync`/`daemon` are bidirectional, and even pull-only replication attempts remote checkpoint writes. Therefore the guarantee is enforced **by CouchDB**.
+
+**Write guard.** `scripts/couchdb-readonly.sh on` PUTs a design document `_design/__livesync_readonly_guard` into the target database:
+
+```json
+{
+    "_id": "_design/__livesync_readonly_guard",
+    "validate_doc_update": "function (newDoc, oldDoc, userCtx) { if (userCtx.roles.indexOf('_admin') !== -1) return; throw { forbidden: 'read-only guard active' }; }"
+}
+```
+
+Every document write by a non-admin user is rejected with 403; reads and the `_changes` feed are unaffected (design-doc writes require admin and bypass the guard, so admins can still remove it). `off` deletes the guard. Both subcommands take admin credentials from `COUCHDB_ADMIN_USER` / `COUCHDB_ADMIN_PASSWORD` env (prompted if unset, never stored).
+
+**Wrapper behaviour with `READ_ONLY=1`** (env or `config/env.local`):
+
+- `install.sh` skips the preflight `sync` (it writes checkpoints) and instead validates credentials with a read-only HTTP GET on the database endpoint
+- `install.sh` does NOT run the upstream installer/daemon (chokidar would push fs → DB); it writes its own `livesync-readonly.service` user unit running `scripts/readonly-loop.sh`
+- `readonly-loop.sh`: `livesync-cli "$VAULT_DIR" sync` then `livesync-cli "$VAULT_DIR" mirror` every `SYNC_INTERVAL` seconds (default 60). Any push attempts are rejected server-side; pull continues (PouchDB treats failed checkpoint writes as non-fatal)
+- The settings must use a **non-admin CouchDB user** while the guard is on; README documents creating one
+- `make pull-once` runs one sync+mirror cycle on demand
+- README warns: while the guard is on, ALL non-admin writes to that database are rejected — including from other devices using non-admin credentials; turn it off after testing (`make readonly-off`)
+- Read-only mirror never deletes local files (upstream `mirror` semantics: DB-only files are restored); documented
+
 
 ## 8. Failure & recovery (README runbook)
 
@@ -159,8 +189,8 @@ Checks; hard failures exit non-zero, warnings do not:
 ## 11. Deliverables checklist
 
 - [ ] `upstream.pin` (1.0.30)
-- [ ] `Makefile` with `bootstrap`, `install`, `update`, `status`, `verify`, `test-e2e-local`
-- [ ] `scripts/bootstrap.sh`, `scripts/install.sh`, `scripts/update.sh`, `scripts/verify.sh`
+- [ ] `Makefile` with `bootstrap`, `install`, `update`, `status`, `verify`, `test-e2e-local`, `pull-once`, `readonly-on`, `readonly-off`
+- [ ] `scripts/bootstrap.sh`, `scripts/install.sh`, `scripts/update.sh`, `scripts/verify.sh`, `scripts/couchdb-readonly.sh`, `scripts/readonly-loop.sh`
 - [ ] `config/settings.example.json`
 - [ ] `config/env.example`
 - [ ] `README.md` runbook
