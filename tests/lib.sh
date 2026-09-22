@@ -12,7 +12,7 @@ assert_eq() {
 }
 
 assert_file_contains() {
-    if grep -qF "$2" "$1" 2>/dev/null; then ok "$3"; else fail "$3: file $1 missing [$2]"; fi
+    if grep -qF -- "$2" "$1" 2>/dev/null; then ok "$3"; else fail "$3: file $1 missing [$2]"; fi
 }
 
 assert_exit_code() {
