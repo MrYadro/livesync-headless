@@ -1,0 +1,4 @@
+config/env.local
+config/settings.json
+settings.json
+.livesync/

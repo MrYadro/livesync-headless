@@ -1,0 +1,14 @@
+{
+    "couchDB_URI": "https://couch.example.com:5984",
+    "couchDB_DBNAME": "obsidian-livesync",
+    "couchDB_USER": "",
+    "couchDB_PASSWORD": "",
+    "encrypt": true,
+    "passphrase": "",
+    "usePathObfuscation": true,
+    "obfuscatePassphrase": "",
+    "liveSync": true,
+    "syncOnSave": true,
+    "syncOnStart": true,
+    "isConfigured": false
+}
