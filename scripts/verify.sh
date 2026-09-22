@@ -33,29 +33,21 @@ else
     hard_fail "settings check failed for $VAULT_DIR/.livesync/settings.json"
 fi
 
-# 3. Local DB roundtrip (hard; skipped with WARN in read-only mode without a built CLI)
-run_cli() {
-    if [[ -n "${LIVESYNC_CLI_CMD:-}" ]]; then
-        $LIVESYNC_CLI_CMD "$@"
-    else
-        "$LIVESYNC_BIN" "$@"
-    fi
-}
-if [[ "$ro_mode" -eq 1 ]]; then
-    ro_cli="$UPSTREAM_DIR/src/apps/cli/dist/index.cjs"
-    if [[ -f "$ro_cli" ]]; then
-        if node "$ro_cli" "$VAULT_DIR" ls >/dev/null 2>&1; then
-            echo "OK: local database reachable (ls)"
-        else
-            hard_fail "livesync-cli ls failed against $VAULT_DIR"
-        fi
-    else
-        echo "WARN: $ro_cli not built - skipping local DB roundtrip (read-only mode)"
-    fi
-elif run_cli "$VAULT_DIR" ls >/dev/null 2>&1; then
-    echo "OK: local database reachable (ls)"
+# 3. Local DB present + daemon live state (hard).
+#    A second CLI process cannot open the local database while the daemon owns
+#    it (single-writer), so we probe the database directory and the journal
+#    instead of invoking livesync-cli.
+if [[ -d "$VAULT_DIR/.livesync/runtime" ]]; then
+    echo "OK: local database present"
 else
-    hard_fail "livesync-cli ls failed against $VAULT_DIR"
+    hard_fail "local database directory missing: $VAULT_DIR/.livesync/runtime"
+fi
+if [[ "$ro_mode" -eq 1 ]]; then
+    echo "OK: local database present (read-only mode; journal liveness check skipped)"
+elif $journalctl_cmd 2>/dev/null | grep -qE "LiveSync active|Replicating with remote|pull cycle"; then
+    echo "OK: daemon reached live state (journal)"
+else
+    hard_fail "no live-state journal lines (see: journalctl --user -u livesync-cli -n 50)"
 fi
 
 # 4. Journal scan (warn-only)

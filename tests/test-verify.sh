@@ -6,7 +6,7 @@ source "$SCRIPT_DIR/../scripts/lib/config.sh"
 source "$SCRIPT_DIR/../scripts/lib/settings.sh"
 
 vault="$TEST_TMP/vault"
-mkdir -p "$vault"
+mkdir -p "$vault/.livesync/runtime"
 COUCHDB_USER=u COUCHDB_PASSWORD=p E2E_PASSPHRASE=e OBFUSCATE_PASSPHRASE=o \
     create_settings "$vault/.livesync/settings.json"
 
@@ -17,7 +17,6 @@ run_verify() {
     VAULT_DIR="$vault" REPO_DIR="$SCRIPT_DIR/.." \
     SYSTEMCTL_CMD="bash $stub_dir/systemctl.sh" \
     JOURNALCTL_CMD="bash $stub_dir/journalctl.sh" \
-    LIVESYNC_CLI_CMD="bash $stub_dir/cli.sh" \
         bash "$SCRIPT_DIR/../scripts/verify.sh"
 }
 
@@ -28,21 +27,17 @@ cat > "$stub_dir/systemctl.sh" <<'EOS'
 [[ "$1 $2" == "is-active ${EXPECT_SERVICE:-livesync-cli}" ]] || { echo "unexpected systemctl args: $*" >&2; exit 2; }
 exit 0
 EOS
+# journal stub: always shows the daemon reaching live state; adds an error line
+# when JOURNAL_ERRORS=1; emits NO live-state lines when JOURNAL_NOT_LIVE=1
 cat > "$stub_dir/journalctl.sh" <<'EOS'
 #!/usr/bin/env bash
-[[ "${JOURNAL_ERRORS:-0}" == "1" ]] && echo "Sep 23 10:00:00 host livesync-cli[1]: some error happened"
+if [[ "${JOURNAL_NOT_LIVE:-0}" != "1" ]]; then
+    echo "Sep 23 10:00:00 host livesync-cli[1]: [Daemon] LiveSync active"
+fi
+if [[ "${JOURNAL_ERRORS:-0}" == "1" ]]; then
+    echo "Sep 23 10:00:01 host livesync-cli[1]: some error happened"
+fi
 exit 0
-EOS
-cat > "$stub_dir/cli.sh" <<'EOS'
-#!/usr/bin/env bash
-[[ "${CLI_FAIL:-0}" == "1" ]] && exit 1
-[[ "$2" == "ls" ]] || { echo "unexpected cli args: $*" >&2; exit 2; }
-exit 0
-EOS
-cat > "$stub_dir/cli-fail.sh" <<'EOS'
-#!/usr/bin/env bash
-echo "cli-fail must never be called: $*" >&2
-exit 3
 EOS
 chmod +x "$stub_dir"/*.sh
 
@@ -62,19 +57,25 @@ assert_exit_code 1 run_verify
 ok "verify fails when obfuscation off"
 sed -i.bak 's/"usePathObfuscation": false/"usePathObfuscation": true/' "$vault/.livesync/settings.json"
 
-# 4. cli ls failing -> non-zero
-export CLI_FAIL=1
-rc=0; run_verify || rc=$?
-assert_eq "$rc" "1" "verify fails when cli ls fails"
-unset CLI_FAIL
+# 4. local DB directory missing -> non-zero (daemon-safe check replaces ls)
+mv "$vault/.livesync/runtime" "$TEST_TMP/runtime-away"
+assert_exit_code 1 run_verify
+ok "verify fails when local database directory missing"
+mv "$TEST_TMP/runtime-away" "$vault/.livesync/runtime"
 
-# 5. journal errors -> warning only, still exit 0
+# 5. no live-state journal lines -> non-zero
+export JOURNAL_NOT_LIVE=1
+rc=0; run_verify || rc=$?
+assert_eq "$rc" "1" "verify fails without live-state journal lines"
+unset JOURNAL_NOT_LIVE
+
+# 6. journal errors -> warning only, still exit 0
 export JOURNAL_ERRORS=1
 assert_exit_code 0 run_verify
 ok "journal errors are warn-only"
 unset JOURNAL_ERRORS
 
-# 6. ALLOW_PLAINTEXT=1 downgrades encrypt check
+# 7. ALLOW_PLAINTEXT=1 downgrades encrypt check
 sed -i.bak 's/"encrypt": true/"encrypt": false/' "$vault/.livesync/settings.json"
 assert_exit_code 1 run_verify
 ok "encrypt off fails by default"
@@ -84,21 +85,19 @@ ok "encrypt off passes with ALLOW_PLAINTEXT=1"
 unset ALLOW_PLAINTEXT
 sed -i.bak 's/"encrypt": false/"encrypt": true/' "$vault/.livesync/settings.json"
 
-# 7. Review Focus: read-only mode -> checks livesync-readonly.service, skips normal-path ls
-#    (UPSTREAM_DIR has no built CLI -> ls skipped with WARN; LIVESYNC_BIN/CLI_CMD would hard-fail if used)
+# 8. Review Focus: read-only mode -> checks livesync-readonly.service and
+#    skips the journal liveness check (loop logs go to the other unit)
 ro_out="$TEST_TMP/ro-verify.out"
-mkdir -p "$vault/.livesync" "$TEST_TMP/up-no-dist"
 touch "$vault/.livesync/read-only-mode"
 rc=0
 EXPECT_SERVICE=livesync-readonly.service \
-VAULT_DIR="$vault" REPO_DIR="$SCRIPT_DIR/.." UPSTREAM_DIR="$TEST_TMP/up-no-dist" \
-LIVESYNC_BIN="$TEST_TMP/nonexistent-livesync-bin" \
+JOURNAL_NOT_LIVE=1 \
+VAULT_DIR="$vault" REPO_DIR="$SCRIPT_DIR/.." \
 SYSTEMCTL_CMD="bash $stub_dir/systemctl.sh" \
 JOURNALCTL_CMD="bash $stub_dir/journalctl.sh" \
-LIVESYNC_CLI_CMD="bash $stub_dir/cli-fail.sh" \
     bash "$SCRIPT_DIR/../scripts/verify.sh" >"$ro_out" 2>&1 || rc=$?
-assert_eq "$rc" "0" "verify passes in read-only mode (ls skipped with WARN)"
-assert_file_contains "$ro_out" "WARN" "ls roundtrip skipped with a warning"
+assert_eq "$rc" "0" "verify passes in read-only mode (journal liveness skipped)"
+assert_file_contains "$ro_out" "journal liveness check skipped" "journal liveness skipped in RO mode"
 assert_file_contains "$ro_out" "service active" "readonly service reported active"
 rm "$vault/.livesync/read-only-mode"
 
