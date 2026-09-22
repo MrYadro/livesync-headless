@@ -51,10 +51,13 @@ T="$vault/.livesync/settings.json" assert_exit_code 0 node -e '
 ' && ok "isConfigured set to true"
 
 # 2. installer NOT called again when settings already exist (idempotent config step)
+printf '# local sentinel: install must not clobber existing settings\n' >> "$vault/.livesync/settings.json"
+fp_before=$(cksum < "$vault/.livesync/settings.json")
 before=$(grep -c INSTALLER_ARGS "$INSTALL_LOG" || true)
 run_install
 after=$(grep -c INSTALLER_ARGS "$INSTALL_LOG" || true)
 assert_eq "$after" "$((before + 1))" "installer ran exactly once more"
+assert_eq "$(cksum < "$vault/.livesync/settings.json")" "$fp_before" "settings not recreated on re-install"
 [[ "$(grep -c 'cli: .* sync' "$cli_log")" -ge 2 ]] && ok "preflight re-runs each install"
 
 # 3. Review Focus: preflight sync failure aborts before installer
