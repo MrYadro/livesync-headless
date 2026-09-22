@@ -77,11 +77,16 @@ echo "[INFO] Starting daemon on vault A..."
 node "$CLI" "$VAULT_A" daemon &
 DAEMON_PID=$!
 
+pull_cycle() { # $1 = vault: sync (remote -> db) then mirror (db -> disk)
+    node "$CLI" "$1" sync >/dev/null 2>&1 || true
+    node "$CLI" "$1" mirror >/dev/null 2>&1 || true
+}
+
 wait_for_file() { # $1 = vault, $2 = path, $3 = content, $4 = timeout_s
     local deadline=$(( $(date +%s) + $4 ))
     while (( $(date +%s) < deadline )); do
         if [[ -f "$1/$2" ]] && grep -qF "$3" "$1/$2"; then return 0; fi
-        node "$CLI" "$1" sync >/dev/null 2>&1 || true
+        pull_cycle "$1"
         sleep 2
     done
     return 1
@@ -99,6 +104,8 @@ fi
 echo "[INFO] B -> A: write in B, expect in A (daemon side)"
 mkdir -p "$VAULT_B/notes"
 echo "hello from B" > "$VAULT_B/notes/from-b.md"
+node "$CLI" "$VAULT_B" mirror >/dev/null
+node "$CLI" "$VAULT_B" sync >/dev/null
 if wait_for_file "$VAULT_A" "notes/from-b.md" "hello from B" 90; then
     echo "OK: B -> A"
 else
