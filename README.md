@@ -43,9 +43,12 @@ Vault path resolution (highest wins): `--vault` flag, `VAULT_DIR` env,
 
 ## CRITICAL: passphrases must match your devices
 
-The E2E passphrase and the obfuscation passphrase MUST equal the values your
-other devices use. The obfuscation passphrase is baked into every document ID
-in the database - a mismatched value does not error out, it silently desyncs.
+The E2E passphrase MUST equal the value your other devices use. Current plugin
+versions use the same passphrase for Obfuscate Properties (single passphrase,
+one checkbox) - the installer defaults the obfuscation passphrase to the E2E
+passphrase. Only set `OBFUSCATE_PASSPHRASE` separately for legacy setups where
+the two differ. The obfuscation passphrase is baked into every document ID in
+the database - a mismatched value does not error out, it silently desyncs.
 Both are stored only in the gitignored `settings.json`.
 
 ## Sync behaviour

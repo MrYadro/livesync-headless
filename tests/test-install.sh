@@ -28,7 +28,7 @@ export INSTALL_LOG="$TEST_TMP/installer.log"
 run_install() {
     VAULT_DIR="$vault" UPSTREAM_DIR="$clone" REPO_DIR="$SCRIPT_DIR/.." \
     COUCHDB_URI="http://127.0.0.1:15984" COUCHDB_DBNAME="testdb" \
-COUCHDB_USER="reader" COUCHDB_PASSWORD="unbound" \
+    COUCHDB_USER="reader" COUCHDB_PASSWORD="readerpass" \
     E2E_PASSPHRASE="e" OBFUSCATE_PASSPHRASE="o" \
     SKIP_BOOTSTRAP=1 LIVESYNC_CLI_CMD="bash $TEST_TMP/stub-cli.sh" \
         bash "$SCRIPT_DIR/../scripts/install.sh"
@@ -51,7 +51,24 @@ T="$vault/.livesync/settings.json" assert_exit_code 0 node -e '
     process.exit(s.isConfigured === true ? 0 : 1);
 ' && ok "isConfigured set to true"
 
-# 2. installer NOT called again when settings already exist (idempotent config step)
+# 2. obfuscation passphrase defaults to the E2E passphrase when not provided
+vault_def="$TEST_TMP/vault-default-obf"
+: > "$INSTALL_LOG"; : > "$cli_log"
+rc=0
+VAULT_DIR="$vault_def" UPSTREAM_DIR="$clone" REPO_DIR="$SCRIPT_DIR/.." \
+SKIP_BOOTSTRAP=1 \
+COUCHDB_URI="http://127.0.0.1:15984" COUCHDB_DBNAME="testdb" \
+COUCHDB_USER="reader" COUCHDB_PASSWORD="readerpass" \
+E2E_PASSPHRASE="shared-secret" \
+LIVESYNC_CLI_CMD="bash $TEST_TMP/stub-cli.sh" \
+    bash "$SCRIPT_DIR/../scripts/install.sh" >/dev/null 2>&1 || rc=$?
+assert_eq "$rc" "0" "install succeeds without OBFUSCATE_PASSPHRASE"
+T="$vault_def/.livesync/settings.json" assert_exit_code 0 node -e '
+    const s = JSON.parse(require("fs").readFileSync(process.env.T, "utf8"));
+    process.exit(s.obfuscatePassphrase === s.passphrase && s.passphrase === "shared-secret" ? 0 : 1);
+' && ok "obfuscation passphrase defaults to E2E passphrase"
+
+# 3. installer NOT called again when settings already exist (idempotent config step)
 #    (sentinel is a JSON-safe extra key: settings must stay parseable for the sanity check)
 T="$vault/.livesync/settings.json" node -e '
     const fs = require("fs");
@@ -67,7 +84,7 @@ assert_eq "$after" "$((before + 1))" "installer ran exactly once more"
 assert_eq "$(cksum < "$vault/.livesync/settings.json")" "$fp_before" "settings not recreated on re-install"
 [[ "$(grep -c 'cli: .* sync' "$cli_log")" -ge 2 ]] && ok "preflight re-runs each install"
 
-# 3. Review Focus: preflight sync failure aborts before installer
+# 4. Review Focus: preflight sync failure aborts before installer
 #    (rc captured with || so `set -e` does not kill the test)
 : > "$INSTALL_LOG"
 rc=0
@@ -75,7 +92,7 @@ CLI_EXIT=1 run_install || rc=$?
 assert_eq "$rc" "1" "install exits non-zero on preflight failure"
 if [[ -s "$INSTALL_LOG" ]]; then fail "installer must not run after failed preflight"; else ok "installer skipped after failed preflight"; fi
 
-# 4. missing secrets in non-interactive mode -> abort with clear error
+# 5. missing secrets in non-interactive mode -> abort with clear error
 rm -rf "$vault/.livesync"
 out=$(VAULT_DIR="$vault" UPSTREAM_DIR="$clone" REPO_DIR="$SCRIPT_DIR/.." \
     SKIP_BOOTSTRAP=1 LIVESYNC_CLI_CMD="bash $TEST_TMP/stub-cli.sh" \
@@ -101,7 +118,7 @@ assert_file_contains "$bad_out" "settings sanity check failed" "error mentions t
 if [[ -s "$INSTALL_LOG" ]]; then fail "installer must not run on bad settings"; else ok "installer skipped on bad settings"; fi
 if [[ -s "$cli_log" ]]; then fail "preflight sync must not run on bad settings"; else ok "preflight sync skipped on bad settings"; fi
 
-# 5. Review Focus: READ_ONLY=1 never runs sync or the upstream installer
+# 6. Review Focus: READ_ONLY=1 never runs sync or the upstream installer
 vault_ro="$TEST_TMP/vault-ro"
 units="$TEST_TMP/units"; mkdir -p "$units"
 cat > "$TEST_TMP/curl.sh" <<'EOS'
