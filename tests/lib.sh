@@ -18,8 +18,16 @@ assert_file_contains() {
 assert_exit_code() {
     local expected="$1"; shift
     local got=0
-    "$@" >/dev/null 2>&1 || got=$?
-    assert_eq "$got" "$expected" "$1 exits with $expected"
+    local log="$TEST_TMP/assert-exit-code.log"
+    "$@" >"$log" 2>&1 || got=$?
+    if [[ "$got" == "$expected" ]]; then
+        ok "$1 exits with $expected"
+    else
+        echo "---- output of failing command ($1):" >&2
+        head -8 "$log" >&2
+        echo "----" >&2
+        fail "$1 exits with $expected (got $got)"
+    fi
 }
 
 finish() {

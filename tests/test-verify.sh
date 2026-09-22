@@ -6,7 +6,7 @@ source "$SCRIPT_DIR/../scripts/lib/config.sh"
 source "$SCRIPT_DIR/../scripts/lib/settings.sh"
 
 vault="$TEST_TMP/vault"
-mkdir -p "$vault/.livesync/runtime"
+mkdir -p "$vault/headless-vault-livesync-v2"
 COUCHDB_USER=u COUCHDB_PASSWORD=p E2E_PASSPHRASE=e OBFUSCATE_PASSPHRASE=o \
     create_settings "$vault/.livesync/settings.json"
 
@@ -58,10 +58,10 @@ ok "verify fails when obfuscation off"
 sed -i.bak 's/"usePathObfuscation": false/"usePathObfuscation": true/' "$vault/.livesync/settings.json"
 
 # 4. local DB directory missing -> non-zero (daemon-safe check replaces ls)
-mv "$vault/.livesync/runtime" "$TEST_TMP/runtime-away"
+mv "$vault/headless-vault-livesync-v2" "$TEST_TMP/runtime-away"
 assert_exit_code 1 run_verify
 ok "verify fails when local database directory missing"
-mv "$TEST_TMP/runtime-away" "$vault/.livesync/runtime"
+mv "$TEST_TMP/runtime-away" "$vault/headless-vault-livesync-v2"
 
 # 5. no live-state journal lines -> non-zero
 export JOURNAL_NOT_LIVE=1

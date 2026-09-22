@@ -37,21 +37,22 @@ fi
 #    A second CLI process cannot open the local database while the daemon owns
 #    it (single-writer), so we probe the database directory and the journal
 #    instead of invoking livesync-cli.
-if [[ -d "$VAULT_DIR/.livesync/runtime" ]]; then
+if [[ -d "$VAULT_DIR/headless-vault-livesync-v2" ]]; then
     echo "OK: local database present"
 else
-    hard_fail "local database directory missing: $VAULT_DIR/.livesync/runtime"
+    hard_fail "local database directory missing: $VAULT_DIR/headless-vault-livesync-v2"
 fi
 if [[ "$ro_mode" -eq 1 ]]; then
     echo "OK: local database present (read-only mode; journal liveness check skipped)"
-elif $journalctl_cmd 2>/dev/null | grep -qE "LiveSync active|Replicating with remote|pull cycle"; then
+elif $journalctl_cmd 2>/dev/null | grep -E "LiveSync active|Replicating with remote|pull cycle" >/dev/null; then
     echo "OK: daemon reached live state (journal)"
 else
     hard_fail "no live-state journal lines (see: journalctl --user -u livesync-cli -n 50)"
 fi
 
-# 4. Journal scan (warn-only)
-if $journalctl_cmd 2>/dev/null | grep -qiE 'error|fatal'; then
+# 4. Journal scan (warn-only; grep reads all input - no -q, so a writer that
+#    outlives the match cannot fail the pipeline via SIGPIPE under pipefail)
+if $journalctl_cmd 2>/dev/null | grep -iE 'error|fatal' >/dev/null; then
     echo "WARN: error-like lines in recent journal (see: journalctl --user -u livesync-cli -n 50)"
 fi
 
