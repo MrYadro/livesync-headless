@@ -55,7 +55,8 @@ livesync-headless/
 │   ├── update.sh             # re-read pin, fetch, rebuild, reinstall, restart service
 │   ├── verify.sh             # healthcheck; non-zero exit on failure
 │   ├── couchdb-readonly.sh   # on|off: install/remove CouchDB write-guard design doc (read-only mode)
-│   └── readonly-loop.sh      # pull-only sync+mirror loop used by the read-only service
+│   ├── readonly-loop.sh      # pull-only sync+mirror loop used by the read-only service
+│   └── import-uri.sh         # apply a passphrase-protected plugin Setup URI to the vault settings
 ├── config/
 │   ├── settings.example.json # template; secrets replaced at install time
 │   └── env.example           # server-specific paths & options, copied to config/env.local (gitignored)
@@ -105,7 +106,7 @@ The vault path is configurable — never hard-coded. Resolution order (highest w
 ```
 
 - `install.sh` fills secrets interactively (or from environment variables `COUCHDB_USER`, `COUCHDB_PASSWORD`, `E2E_PASSPHRASE`, `OBFUSCATE_PASSPHRASE`) into the server-local `settings.json`; that file is world-unreadable (0600) and never committed
-- Alternative: apply a plugin Setup URI (`livesync-cli setup "obsidian://setuplivesync?..."`) — carries E2E + obfuscation settings automatically; `isConfigured` set to true afterwards
+- Alternative: apply a plugin Setup URI via `scripts/import-uri.sh "<uri>"` (`make import-uri URI=...`) — handles the URI's **passphrase protection**: passphrase from `SETUP_URI_PASSPHRASE` env (prompted on tty, hard error non-tty), piped to the CLI `setup` command on stdin; after import the script enforces `settings.json` mode 0600 and the same sanity checks as `verify.sh` (`isConfigured`, `usePathObfuscation`, `encrypt` unless `ALLOW_PLAINTEXT=1`). The URI carries E2E + obfuscation settings automatically.
 - Constraints documented in README:
   - E2E passphrase and obfuscation passphrase **must match the other devices**; the obfuscation passphrase is baked into existing document IDs — a mismatched value produces broken sync, not an error
   - Changing either passphrase on all devices is a coordinated migration, out of scope for scripts
@@ -190,7 +191,7 @@ Every document write by a non-admin user is rejected with 403; reads and the `_c
 
 - [ ] `upstream.pin` (1.0.30)
 - [ ] `Makefile` with `bootstrap`, `install`, `update`, `status`, `verify`, `test-e2e-local`, `pull-once`, `readonly-on`, `readonly-off`
-- [ ] `scripts/bootstrap.sh`, `scripts/install.sh`, `scripts/update.sh`, `scripts/verify.sh`, `scripts/couchdb-readonly.sh`, `scripts/readonly-loop.sh`
+- [ ] `scripts/bootstrap.sh`, `scripts/install.sh`, `scripts/update.sh`, `scripts/verify.sh`, `scripts/couchdb-readonly.sh`, `scripts/readonly-loop.sh`, `scripts/import-uri.sh`
 - [ ] `config/settings.example.json`
 - [ ] `config/env.example`
 - [ ] `README.md` runbook
