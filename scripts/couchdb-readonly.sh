@@ -39,7 +39,6 @@ NODE
 )
 
 curl_cmd="${CURL_CMD:-curl}"
-auth="$COUCHDB_ADMIN_USER:$COUCHDB_ADMIN_PASSWORD"
 guard_url="$db_url/$db_name/_design/__livesync_readonly_guard"
 
 guard_rev() { # echoes current _rev, or empty if absent
@@ -51,6 +50,7 @@ guard_rev() { # echoes current _rev, or empty if absent
 }
 
 require_admin
+auth="$COUCHDB_ADMIN_USER:$COUCHDB_ADMIN_PASSWORD"
 
 if [[ "$action" == "on" ]]; then
     rev="$(guard_rev)"

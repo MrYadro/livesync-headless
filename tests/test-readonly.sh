@@ -56,7 +56,17 @@ if grep -q -- "-X DELETE" "$CURL_LOG"; then fail "no DELETE when guard absent"; 
 assert_exit_code 1 run_guard nonsense
 ok "rejects unknown subcommand"
 
-# 5. pull-once runs sync then mirror via the CLI
+# 5. missing admin creds (non-tty) -> friendly error, not unbound variable
+creds_out="$TEST_TMP/missing-creds.out"; rc=0
+env -u COUCHDB_ADMIN_USER -u COUCHDB_ADMIN_PASSWORD \
+    VAULT_DIR="$vault" REPO_DIR="$SCRIPT_DIR/.." \
+    CURL_CMD="bash $TEST_TMP/curl.sh" \
+    bash "$SCRIPT_DIR/../scripts/couchdb-readonly.sh" on </dev/null >"$creds_out" 2>&1 || rc=$?
+if [[ "$rc" -ne 0 ]]; then ok "missing admin creds exits non-zero"; else fail "missing admin creds exits non-zero"; fi
+if grep -qF -- "unbound variable" "$creds_out"; then fail "fails with friendly error, not unbound variable"; else ok "fails with friendly error, not unbound variable"; fi
+assert_file_contains "$creds_out" "COUCHDB_ADMIN_USER / COUCHDB_ADMIN_PASSWORD not set" "error names the admin variables"
+
+# 6. pull-once runs sync then mirror via the CLI
 export CLI_LOG="$TEST_TMP/cli.log"; : > "$CLI_LOG"
 cat > "$TEST_TMP/cli.sh" <<'EOS'
 #!/usr/bin/env bash
