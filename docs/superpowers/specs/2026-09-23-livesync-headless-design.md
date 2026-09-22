@@ -54,7 +54,8 @@ livesync-headless/
 │   ├── update.sh             # re-read pin, fetch, rebuild, reinstall, restart service
 │   └── verify.sh             # healthcheck; non-zero exit on failure
 ├── config/
-│   └── settings.example.json # template; secrets replaced at install time
+│   ├── settings.example.json # template; secrets replaced at install time
+│   └── env.example           # server-specific paths & options, copied to config/env.local (gitignored)
 └── README.md                 # runbook: setup, recovery, updates
 ```
 
@@ -68,7 +69,16 @@ livesync-headless/
 | `~/.local/lib/livesync-cli`, `~/.local/bin/livesync-cli` | installed CLI (managed by upstream installer) |
 | `~/.config/systemd/user/livesync-cli.service` | systemd unit |
 
-Environment-overridable defaults: `VAULT_DIR=~/vault`, `UPSTREAM_DIR=~/opt/obsidian-livesync`.
+### Path configuration
+
+The vault path is configurable — never hard-coded. Resolution order (highest wins):
+
+1. `--vault <path>` flag on `bootstrap.sh` / `install.sh` / `update.sh` / `verify.sh`
+2. `VAULT_DIR` environment variable
+3. `config/env.local` (gitignored, server-specific; created from `config/env.example`)
+4. Default: `~/vault`
+
+`config/env.local` also carries `UPSTREAM_DIR` (default `~/opt/obsidian-livesync`) and optional `SYNC_INTERVAL` (seconds; unset = LiveSync `_changes` mode). All scripts `source` it if present; flags and environment always override.
 
 ## 6. Configuration & secrets
 
@@ -108,8 +118,7 @@ Environment-overridable defaults: `VAULT_DIR=~/vault`, `UPSTREAM_DIR=~/opt/obsid
 ### install.sh
 1. Run `bootstrap.sh` if `UPSTREAM_DIR` is missing
 2. If `~/vault/.livesync/settings.json` missing: create from template, fill secrets (prompt or env), set `isConfigured: true`, `chmod 0600`, run one `sync` cycle to validate credentials before enabling the service
-3. Run upstream `deploy/install.sh --user --vault "$VAULT_DIR"` (no `--interval` → LiveSync mode unless `SYNC_INTERVAL` set)
-4. Report service status
+3. Run upstream `deploy/install.sh --user --vault "$VAULT_DIR"` (no `--interval` → LiveSync mode unless `SYNC_INTERVAL` set)4. Report service status
 
 ### update.sh
 1. Require the new pin to differ from the installed one; show pin diff
@@ -153,5 +162,6 @@ Checks; hard failures exit non-zero, warnings do not:
 - [ ] `Makefile` with `bootstrap`, `install`, `update`, `status`, `verify`, `test-e2e-local`
 - [ ] `scripts/bootstrap.sh`, `scripts/install.sh`, `scripts/update.sh`, `scripts/verify.sh`
 - [ ] `config/settings.example.json`
+- [ ] `config/env.example`
 - [ ] `README.md` runbook
-- [ ] `.gitignore` (settings.json, upstream clone, vault data)
+- [ ] `.gitignore` (settings.json, config/env.local, upstream clone, vault data)
