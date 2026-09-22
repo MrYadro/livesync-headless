@@ -20,10 +20,12 @@ if [[ ! -f "$settings" ]]; then
 fi
 
 require_admin() {
-    if [[ -z "${COUCHDB_ADMIN_USER:-}" || ${#COUCHDB_ADMIN_PASSWORD} -eq 0 ]]; then
+    if [[ -z "${COUCHDB_ADMIN_USER:-}" || -z "${COUCHDB_ADMIN_PASSWORD+x}" || -z "$COUCHDB_ADMIN_PASSWORD" ]]; then
         if [[ -t 0 ]]; then
             [[ -z "${COUCHDB_ADMIN_USER:-}" ]] && read -rp "CouchDB admin user: " COUCHDB_ADMIN_USER
-            [[ ${#COUCHDB_ADMIN_PASSWORD} -eq 0 ]] && read -rsp "CouchDB admin password: " COUCHDB_ADMIN_PASSWORD >&2 && echo >&2
+            if [[ -z "${COUCHDB_ADMIN_PASSWORD+x}" || -z "$COUCHDB_ADMIN_PASSWORD" ]]; then
+                read -rsp "CouchDB admin password: " COUCHDB_ADMIN_PASSWORD >&2 && echo >&2
+            fi
             export COUCHDB_ADMIN_USER COUCHDB_ADMIN_PASSWORD
         else
             echo "Error: COUCHDB_ADMIN_USER / COUCHDB_ADMIN_PASSWORD not set and stdin is not a terminal." >&2
@@ -41,9 +43,23 @@ NODE
 curl_cmd="${CURL_CMD:-curl}"
 guard_url="$db_url/$db_name/_design/__livesync_readonly_guard"
 
-guard_rev() { # echoes current _rev, or empty if absent
-    local body
-    body=$($curl_cmd -sf -u "$auth" "$guard_url" 2>/dev/null || true)
+guard_rev() { # echoes current _rev, or empty string when the guard doc is absent (HTTP 404)
+    local body rc=0 http_code
+    body=$($curl_cmd -sf -u "$auth" -w '\n%{http_code}' "$guard_url" 2>/dev/null) || rc=$?
+    if [[ "$rc" -ne 0 && "$rc" -ne 22 ]]; then
+        echo "Error: could not query $guard_url (curl exit $rc) - check URI/credentials/network." >&2
+        return 1
+    fi
+    http_code="${body##*$'\n'}"
+    if [[ "$rc" -eq 22 ]]; then
+        if [[ "$http_code" == "404" ]]; then
+            echo ""   # 404 with -f: guard absent
+            return 0
+        fi
+        echo "Error: could not query $guard_url (HTTP $http_code) - check URI/credentials/network." >&2
+        return 1
+    fi
+    body="${body%$'\n'*}"
     if [[ -n "$body" ]]; then
         echo "$body" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const j=JSON.parse(d);console.log(j._rev||"")}catch(e){console.log("")}})'
     fi

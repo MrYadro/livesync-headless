@@ -31,7 +31,7 @@ cleanup() {
 trap cleanup EXIT
 
 echo "[INFO] Starting CouchDB container..."
-docker run -d --rm --name "$COUCH_NAME" -p "$COUCH_PORT:5984" \
+docker run -d --rm --name "$COUCH_NAME" -p 127.0.0.1:$COUCH_PORT:5984 \
     -e COUCHDB_USER="$COUCH_ADMIN" -e COUCHDB_PASSWORD="$COUCH_ADMIN_PW" couchdb:3 >/dev/null
 
 echo "[INFO] Waiting for CouchDB..."

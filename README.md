@@ -79,6 +79,8 @@ Notes:
   other devices if they use non-admin credentials. Turn it off when done.
 - Read-only sync is additive: it never deletes local files (upstream mirror
   semantics restore DB-only files).
+- Read-only installs are updated with `READ_ONLY=1 make update`; `make verify`
+  checks the livesync-readonly service.
 
 ## Daily operations
 

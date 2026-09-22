@@ -42,4 +42,22 @@ assert_exit_code 0 run_update
 assert_eq "$(git -C "$clone" describe --tags)" "9.9.9" "clone moved to new pin"
 assert_eq "$(cat "$clone/.livesync-headless-pin")" "9.9.9" "new pin recorded"
 
+# 3. Review Focus: read-only marker present, READ_ONLY unset -> abort with guidance
+mkdir -p "$TEST_TMP/vault/.livesync"
+touch "$TEST_TMP/vault/.livesync/read-only-mode"
+echo "9.9.8" > "$repo/upstream.pin"
+ro_out="$TEST_TMP/ro-update.out"; rc=0
+run_update >"$ro_out" 2>&1 || rc=$?
+assert_eq "$rc" "1" "update aborts on read-only marker without READ_ONLY=1"
+assert_file_contains "$ro_out" "Read-only install detected" "abort explains the read-only marker"
+assert_file_contains "$ro_out" "READ_ONLY=1 make update" "abort tells the operator how to proceed"
+
+# 4. read-only marker present + READ_ONLY=1 -> proceeds normally
+rc=0
+VAULT_DIR="$TEST_TMP/vault" UPSTREAM_DIR="$clone" REPO_DIR="$repo" \
+UPSTREAM_REMOTE="$fixture" SKIP_BUILD=1 SKIP_INSTALL=1 SKIP_VERIFY=1 READ_ONLY=1 \
+    bash "$SCRIPT_DIR/../scripts/update.sh" >"$ro_out" 2>&1 || rc=$?
+assert_eq "$rc" "0" "update proceeds with READ_ONLY=1 despite marker"
+assert_eq "$(git -C "$clone" describe --tags)" "9.9.8" "clone moved to pin under READ_ONLY=1"
+
 finish

@@ -2,6 +2,7 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
+source "$SCRIPT_DIR/../scripts/lib/settings.sh"
 
 # Fixture upstream (clone from Task-3-style fixture) with stub installer that logs its args
 fixture="$TEST_TMP/upstream-remote"
@@ -27,7 +28,7 @@ export INSTALL_LOG="$TEST_TMP/installer.log"
 run_install() {
     VAULT_DIR="$vault" UPSTREAM_DIR="$clone" REPO_DIR="$SCRIPT_DIR/.." \
     COUCHDB_URI="http://127.0.0.1:15984" COUCHDB_DBNAME="testdb" \
-    COUCHDB_USER="admin" COUCHDB_PASSWORD="install-test-password" \
+COUCHDB_USER="reader" COUCHDB_PASSWORD="unbound" \
     E2E_PASSPHRASE="e" OBFUSCATE_PASSPHRASE="o" \
     SKIP_BOOTSTRAP=1 LIVESYNC_CLI_CMD="bash $TEST_TMP/stub-cli.sh" \
         bash "$SCRIPT_DIR/../scripts/install.sh"
@@ -51,7 +52,13 @@ T="$vault/.livesync/settings.json" assert_exit_code 0 node -e '
 ' && ok "isConfigured set to true"
 
 # 2. installer NOT called again when settings already exist (idempotent config step)
-printf '# local sentinel: install must not clobber existing settings\n' >> "$vault/.livesync/settings.json"
+#    (sentinel is a JSON-safe extra key: settings must stay parseable for the sanity check)
+T="$vault/.livesync/settings.json" node -e '
+    const fs = require("fs");
+    const s = JSON.parse(fs.readFileSync(process.env.T, "utf8"));
+    s.sentinel = "must-not-be-clobbered";
+    fs.writeFileSync(process.env.T, JSON.stringify(s, null, 4) + "\n");
+'
 fp_before=$(cksum < "$vault/.livesync/settings.json")
 before=$(grep -c INSTALLER_ARGS "$INSTALL_LOG" || true)
 run_install
@@ -75,6 +82,24 @@ out=$(VAULT_DIR="$vault" UPSTREAM_DIR="$clone" REPO_DIR="$SCRIPT_DIR/.." \
     bash "$SCRIPT_DIR/../scripts/install.sh" </dev/null 2>&1) && rc=0 || rc=$?
 assert_eq "$rc" "1" "aborts without secrets in non-tty mode"
 assert_file_contains <(echo "$out") "COUCHDB_USER" "error names the first missing variable"
+
+# 4a. Review Focus: pre-existing settings.json is sanity-checked (obfuscation off -> abort)
+vault_bad="$TEST_TMP/vault-bad"
+VAULT_DIR="$vault_bad" REPO_DIR="$SCRIPT_DIR/.." \
+COUCHDB_URI="http://127.0.0.1:15984" COUCHDB_DBNAME="testdb" \
+COUCHDB_USER="admin" COUCHDB_PASSWORD="install-test-password" \
+E2E_PASSPHRASE="e" OBFUSCATE_PASSPHRASE="o" \
+    create_settings "$vault_bad/.livesync/settings.json" >/dev/null
+sed -i.bak 's/"usePathObfuscation": true/"usePathObfuscation": false/' "$vault_bad/.livesync/settings.json"
+: > "$INSTALL_LOG"; : > "$cli_log"
+bad_out="$TEST_TMP/bad-settings.out"; rc=0
+VAULT_DIR="$vault_bad" UPSTREAM_DIR="$clone" REPO_DIR="$SCRIPT_DIR/.." \
+    SKIP_BOOTSTRAP=1 LIVESYNC_CLI_CMD="bash $TEST_TMP/stub-cli.sh" \
+    bash "$SCRIPT_DIR/../scripts/install.sh" >"$bad_out" 2>&1 || rc=$?
+assert_eq "$rc" "1" "install aborts on pre-existing bad settings"
+assert_file_contains "$bad_out" "settings sanity check failed" "error mentions the sanity check"
+if [[ -s "$INSTALL_LOG" ]]; then fail "installer must not run on bad settings"; else ok "installer skipped on bad settings"; fi
+if [[ -s "$cli_log" ]]; then fail "preflight sync must not run on bad settings"; else ok "preflight sync skipped on bad settings"; fi
 
 # 5. Review Focus: READ_ONLY=1 never runs sync or the upstream installer
 vault_ro="$TEST_TMP/vault-ro"
@@ -111,5 +136,6 @@ assert_file_contains "$CURL_LOG" "127.0.0.1:15984/testdb" "read-only preflight G
 assert_file_contains "$units/livesync-readonly.service" "readonly-loop.sh" "unit runs readonly-loop.sh"
 assert_file_contains "$units/livesync-readonly.service" "$vault_ro" "unit points at the vault"
 assert_file_contains "$SYSTEMCTL_LOG" "enable --now livesync-readonly.service" "service enabled"
+[[ -f "$vault_ro/.livesync/read-only-mode" ]] && ok "read-only mode marker written" || fail "read-only mode marker written"
 
 finish

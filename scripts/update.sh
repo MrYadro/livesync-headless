@@ -20,6 +20,11 @@ else
     echo "[INFO] No recorded pin; updating to $PIN"
 fi
 
+if [[ -f "$VAULT_DIR/.livesync/read-only-mode" && "${READ_ONLY:-0}" != "1" ]]; then
+    echo "Error: Read-only install detected. Re-run as: READ_ONLY=1 make update (or remove the marker to switch to full sync)." >&2
+    exit 1
+fi
+
 bash "$SCRIPT_DIR/bootstrap.sh" --vault "$VAULT_DIR" --upstream "$UPSTREAM_DIR"
 
 if [[ "${SKIP_INSTALL:-0}" != "1" ]]; then

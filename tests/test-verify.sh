@@ -21,11 +21,11 @@ run_verify() {
         bash "$SCRIPT_DIR/../scripts/verify.sh"
 }
 
-# systemctl stub: active unless SERVICE_INACTIVE=1
+# systemctl stub: active unless SERVICE_INACTIVE=1; expects ${EXPECT_SERVICE:-livesync-cli}
 cat > "$stub_dir/systemctl.sh" <<'EOS'
 #!/usr/bin/env bash
 [[ "${SERVICE_INACTIVE:-0}" == "1" ]] && exit 1
-[[ "$1 $2" == "is-active livesync-cli" ]] || { echo "unexpected systemctl args: $*" >&2; exit 2; }
+[[ "$1 $2" == "is-active ${EXPECT_SERVICE:-livesync-cli}" ]] || { echo "unexpected systemctl args: $*" >&2; exit 2; }
 exit 0
 EOS
 cat > "$stub_dir/journalctl.sh" <<'EOS'
@@ -38,6 +38,11 @@ cat > "$stub_dir/cli.sh" <<'EOS'
 [[ "${CLI_FAIL:-0}" == "1" ]] && exit 1
 [[ "$2" == "ls" ]] || { echo "unexpected cli args: $*" >&2; exit 2; }
 exit 0
+EOS
+cat > "$stub_dir/cli-fail.sh" <<'EOS'
+#!/usr/bin/env bash
+echo "cli-fail must never be called: $*" >&2
+exit 3
 EOS
 chmod +x "$stub_dir"/*.sh
 
@@ -77,5 +82,24 @@ export ALLOW_PLAINTEXT=1
 assert_exit_code 0 run_verify
 ok "encrypt off passes with ALLOW_PLAINTEXT=1"
 unset ALLOW_PLAINTEXT
+sed -i.bak 's/"encrypt": false/"encrypt": true/' "$vault/.livesync/settings.json"
+
+# 7. Review Focus: read-only mode -> checks livesync-readonly.service, skips normal-path ls
+#    (UPSTREAM_DIR has no built CLI -> ls skipped with WARN; LIVESYNC_BIN/CLI_CMD would hard-fail if used)
+ro_out="$TEST_TMP/ro-verify.out"
+mkdir -p "$vault/.livesync" "$TEST_TMP/up-no-dist"
+touch "$vault/.livesync/read-only-mode"
+rc=0
+EXPECT_SERVICE=livesync-readonly.service \
+VAULT_DIR="$vault" REPO_DIR="$SCRIPT_DIR/.." UPSTREAM_DIR="$TEST_TMP/up-no-dist" \
+LIVESYNC_BIN="$TEST_TMP/nonexistent-livesync-bin" \
+SYSTEMCTL_CMD="bash $stub_dir/systemctl.sh" \
+JOURNALCTL_CMD="bash $stub_dir/journalctl.sh" \
+LIVESYNC_CLI_CMD="bash $stub_dir/cli-fail.sh" \
+    bash "$SCRIPT_DIR/../scripts/verify.sh" >"$ro_out" 2>&1 || rc=$?
+assert_eq "$rc" "0" "verify passes in read-only mode (ls skipped with WARN)"
+assert_file_contains "$ro_out" "WARN" "ls roundtrip skipped with a warning"
+assert_file_contains "$ro_out" "service active" "readonly service reported active"
+rm "$vault/.livesync/read-only-mode"
 
 finish

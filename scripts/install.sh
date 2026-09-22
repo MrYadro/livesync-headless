@@ -43,6 +43,13 @@ if [[ ! -f "$settings" ]]; then
     create_settings "$settings"
 fi
 
+allow_flag=()
+if [[ "${ALLOW_PLAINTEXT:-0}" == "1" ]]; then allow_flag=(--allow-plaintext); fi
+if ! check_settings "$settings" ${allow_flag[@]+"${allow_flag[@]}"}; then
+    echo "Error: settings sanity check failed for $settings (see above)." >&2
+    exit 1
+fi
+
 preflight_readonly() {
     # Read-only credential check: GET the database endpoint. Cannot write anything.
     local creds url auth
@@ -77,6 +84,7 @@ WantedBy=default.target
 EOF
     $systemctl_cmd daemon-reload
     $systemctl_cmd enable --now livesync-readonly.service
+    touch "$VAULT_DIR/.livesync/read-only-mode"
 }
 
 if [[ "${READ_ONLY:-0}" == "1" ]]; then
