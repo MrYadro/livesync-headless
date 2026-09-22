@@ -18,7 +18,8 @@
 - No secrets in git: `config/settings.example.json` has empty secret fields; live `settings.json` and `config/env.local` are gitignored; settings file mode `0600`
 - Default is LiveSync `_changes` mode; polling only when `SYNC_INTERVAL` is set
 - `usePathObfuscation: true` and `encrypt: true` in every settings artifact; verify treats them as hard failures
-- Unit tests must not touch the network — use local git fixtures and stub commands
+- Read-only mode (spec §7a): `READ_ONLY=1` → no preflight `sync`, no upstream installer/daemon; own `livesync-readonly.service` runs `scripts/readonly-loop.sh`; write guarantee enforced by CouchDB guard doc `_design/__livesync_readonly_guard`; guard credentials come from `COUCHDB_ADMIN_USER`/`COUCHDB_ADMIN_PASSWORD`, never stored
+- Unit tests must not touch the network — use local git fixtures and stub commands (including `CURL_CMD` and `SYSTEMCTL_CMD` stubs for read-only paths)
 - Synthetic secrets only in tests (e.g. `testpass-e2e`) — never real credentials
 
 ## Review Focus
@@ -30,6 +31,7 @@ Spec-implied failure modes; each is pinned by a test in the owning task:
 3. **Silent desync from obfuscation off** — `verify.sh` must exit non-zero when `usePathObfuscation` is false (owner: Task 5, test `fails_when_obfuscation_off`)
 4. **Dirty upstream clone** — `bootstrap.sh` must abort on a locally modified clone (owner: Task 3, test `refuses_dirty_upstream_tree`)
 5. **Bad credentials enabled as a service** — `install.sh` must abort when the preflight `sync` fails, before running the installer (owner: Task 4, test `aborts_when_preflight_sync_fails`)
+6. **Read-only mode secretly writing to the remote** — with `READ_ONLY=1`, install must not run `sync` or the upstream installer, and the guard must actually be PUT onto the database (owners: Task 4 test `readonly_install_never_syncs_or_installs_daemon`, Task 7 test `puts_guard_doc`)
 
 ---
 
@@ -318,19 +320,16 @@ source "$SCRIPT_DIR/../scripts/lib/settings.sh"
 target="$TEST_TMP/.livesync/settings.json"
 
 # 1. create_settings fills env secrets, sets isConfigured, keeps E2E+obfuscation on
-COUCHDB_URI="http://127.0.0.1:15984" \
-COUCHDB_DBNAME="testdb" \
-COUCHDB_USER="admin" \
-COUCHDB_PASSWORD="testpass-e2e" \
-E2E_PASSPHRASE="e2e-secret" \
-OBFUSCATE_PASSPHRASE="obf-secret" \
+#    (expected values are read back from the same env vars - no literal comparison)
+export COUCHDB_URI="http://127.0.0.1:15984" COUCHDB_DBNAME="testdb" COUCHDB_USER="admin" \
+    COUCHDB_PASSWORD="testpass-e2e" E2E_PASSPHRASE="e2e-secret" OBFUSCATE_PASSPHRASE="obf-secret"
 create_settings "$target"
 
 T="$target" assert_exit_code 0 node -e '
     const s = JSON.parse(require("fs").readFileSync(process.env.T, "utf8"));
-    const want = {couchDB_URI: "http://127.0.0.1:15984", couchDB_DBNAME: "testdb",
-        couchDB_USER: "admin", couchDB_PASSWORD: "testpass-e2e",
-        passphrase: "e2e-secret", obfuscatePassphrase: "obf-secret",
+    const want = {couchDB_URI: process.env.COUCHDB_URI, couchDB_DBNAME: process.env.COUCHDB_DBNAME,
+        couchDB_USER: process.env.COUCHDB_USER, couchDB_PASSWORD: process.env.COUCHDB_PASSWORD,
+        passphrase: process.env.E2E_PASSPHRASE, obfuscatePassphrase: process.env.OBFUSCATE_PASSPHRASE,
         isConfigured: true, encrypt: true, usePathObfuscation: true};
     for (const k in want) if (s[k] !== want[k]) { console.error("mismatch: " + k); process.exit(1); }
 ' && ok "create_settings fills secrets and flags"
@@ -574,15 +573,15 @@ git commit -m "feat: bootstrap pinned upstream clone with dirty-tree guard"
 
 ---
 
-### Task 4: install.sh — settings, preflight sync, upstream installer
+### Task 4: install.sh — settings, preflight sync, upstream installer (+ read-only branch)
 
 **Files:**
-- Create: `scripts/install.sh`, `tests/test-install.sh`
+- Create: `scripts/install.sh`, `scripts/readonly-loop.sh`, `tests/test-install.sh`
 - Test: `tests/test-install.sh`
 
 **Interfaces:**
 - Consumes: `resolve_config` (Task 1), `create_settings` (Task 2), `scripts/bootstrap.sh` (Task 3)
-- Produces: exit 0 after: settings exist at `$VAULT_DIR/.livesync/settings.json` (0600, `isConfigured: true`), preflight `sync` succeeded, and upstream `deploy/install.sh --user --vault <vault> [--interval N]` ran. Env overrides for tests: `LIVESYNC_CLI_CMD` (command prefix replacing `node <upstream>/src/apps/cli/dist/index.cjs`), `SKIP_BOOTSTRAP=1`, `UPSTREAM_REMOTE`/`SKIP_BUILD` pass through to bootstrap.
+- Produces: exit 0 after: settings exist at `$VAULT_DIR/.livesync/settings.json` (0600, `isConfigured: true`), preflight succeeded, and either the upstream installer ran (`deploy/install.sh --user --vault <vault> [--interval N]`) or — with `READ_ONLY=1` — a `livesync-readonly.service` unit (at `${UNIT_DIR:-$HOME/.config/systemd/user}/livesync-readonly.service`) running `scripts/readonly-loop.sh` was written and enabled via `${SYSTEMCTL_CMD:-systemctl --user}`. Also produces `scripts/readonly-loop.sh`: infinite `sync` + `mirror` loop every `${SYNC_INTERVAL:-60}`s, honouring `LIVESYNC_CLI_CMD`. Env overrides for tests: `LIVESYNC_CLI_CMD`, `CURL_CMD`, `UNIT_DIR`, `SYSTEMCTL_CMD`, `SKIP_BOOTSTRAP=1`; `UPSTREAM_REMOTE`/`SKIP_BUILD` pass through to bootstrap.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -661,6 +660,42 @@ out=$(VAULT_DIR="$vault" UPSTREAM_DIR="$clone" REPO_DIR="$SCRIPT_DIR/.." \
 assert_eq "$rc" "1" "aborts without secrets in non-tty mode"
 assert_file_contains <(echo "$out") "COUCHDB_USER" "error names the first missing variable"
 
+# 5. Review Focus: READ_ONLY=1 never runs sync or the upstream installer
+vault_ro="$TEST_TMP/vault-ro"
+units="$TEST_TMP/units"; mkdir -p "$units"
+cat > "$TEST_TMP/curl.sh" <<'EOS'
+#!/usr/bin/env bash
+echo "curl: $*" >> "${CURL_LOG:?}"
+exit 0
+EOS
+cat > "$TEST_TMP/systemctl-ro.sh" <<'EOS'
+#!/usr/bin/env bash
+echo "systemctl: $*" >> "${SYSTEMCTL_LOG:?}"
+exit 0
+EOS
+chmod +x "$TEST_TMP/curl.sh" "$TEST_TMP/systemctl-ro.sh"
+export CURL_LOG="$TEST_TMP/curl.log" SYSTEMCTL_LOG="$TEST_TMP/systemctl.log"
+: > "$CURL_LOG"; : > "$SYSTEMCTL_LOG"; : > "$INSTALL_LOG"; : > "$cli_log"
+
+rc=0
+VAULT_DIR="$vault_ro" UPSTREAM_DIR="$clone" REPO_DIR="$SCRIPT_DIR/.." \
+SKIP_BOOTSTRAP=1 READ_ONLY=1 \
+COUCHDB_URI="http://127.0.0.1:15984" COUCHDB_DBNAME="testdb" \
+COUCHDB_USER="reader" COUCHDB_PASSWORD="readerpass" \
+E2E_PASSPHRASE="e" OBFUSCATE_PASSPHRASE="o" \
+LIVESYNC_CLI_CMD="bash $TEST_TMP/stub-cli.sh" \
+CURL_CMD="bash $TEST_TMP/curl.sh" \
+SYSTEMCTL_CMD="bash $TEST_TMP/systemctl-ro.sh" \
+UNIT_DIR="$units" \
+    bash "$SCRIPT_DIR/../scripts/install.sh" || rc=$?
+assert_eq "$rc" "0" "read-only install succeeds"
+if [[ -s "$cli_log" ]]; then fail "read-only install must not run sync"; else ok "read-only install never calls the CLI"; fi
+if [[ -s "$INSTALL_LOG" ]]; then fail "read-only install must not run upstream installer"; else ok "upstream installer skipped in read-only mode"; fi
+assert_file_contains "$CURL_LOG" "127.0.0.1:15984/testdb" "read-only preflight GETs the database URL"
+assert_file_contains "$units/livesync-readonly.service" "readonly-loop.sh" "unit runs readonly-loop.sh"
+assert_file_contains "$units/livesync-readonly.service" "$vault_ro" "unit points at the vault"
+assert_file_contains "$SYSTEMCTL_LOG" "enable --now livesync-readonly.service" "service enabled"
+
 finish
 ```
 
@@ -721,6 +756,55 @@ if [[ ! -f "$settings" ]]; then
     create_settings "$settings"
 fi
 
+preflight_readonly() {
+    # Read-only credential check: GET the database endpoint. Cannot write anything.
+    local creds url auth
+    creds=$(SETTINGS_TARGET="$settings" node <<'NODE'
+const s = JSON.parse(require("fs").readFileSync(process.env.SETTINGS_TARGET, "utf8"));
+console.log(s.couchDB_URI.replace(/\/$/, "") + "/" + s.couchDB_DBNAME + " " + s.couchDB_USER + ":" + s.couchDB_PASSWORD);
+NODE
+)
+    url="${creds%% *}"; auth="${creds#* }"
+    local curl_cmd="${CURL_CMD:-curl}"
+    $curl_cmd -sf -u "$auth" "$url" >/dev/null
+}
+
+install_readonly_service() {
+    local unit_dir="${UNIT_DIR:-$HOME/.config/systemd/user}"
+    local systemctl_cmd="${SYSTEMCTL_CMD:-systemctl --user}"
+    mkdir -p "$unit_dir"
+    cat > "$unit_dir/livesync-readonly.service" <<EOF
+[Unit]
+Description=livesync-headless read-only pull loop
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+ExecStart=$SCRIPT_DIR/readonly-loop.sh --vault $VAULT_DIR
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+EOF
+    $systemctl_cmd daemon-reload
+    $systemctl_cmd enable --now livesync-readonly.service
+}
+
+if [[ "${READ_ONLY:-0}" == "1" ]]; then
+    echo "[INFO] READ_ONLY=1: validating credentials with read-only GET (no writes)"
+    if ! preflight_readonly; then
+        echo "Error: read-only preflight failed - check URI/credentials. Service NOT enabled." >&2
+        exit 1
+    fi
+    echo "[INFO] READ_ONLY=1: installing pull-only service (no daemon, no upstream installer)"
+    install_readonly_service
+    echo "[INFO] Read-only mode installed: livesync-readonly.service"
+    echo "       Use a NON-ADMIN CouchDB user while the write guard is on; see README."
+    exit 0
+fi
+
 echo "[INFO] Preflight sync (validates credentials before enabling service)..."
 if ! run_cli "$VAULT_DIR" sync; then
     echo "Error: preflight sync failed - check URI/credentials/passphrases. Service NOT enabled." >&2
@@ -738,20 +822,51 @@ bash "$UPSTREAM_DIR/src/apps/cli/deploy/install.sh" --user --vault "$VAULT_DIR" 
 echo "[INFO] Install complete. Check: systemctl --user status livesync-cli"
 ```
 
+Create `scripts/readonly-loop.sh`:
+
 ```bash
-chmod +x scripts/install.sh
+#!/usr/bin/env bash
+# Pull-only loop for READ_ONLY mode: sync (remote -> local db) then mirror (db -> fs).
+# Any attempted remote writes are rejected by the CouchDB write guard (see couchdb-readonly.sh).
+set -euo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/config.sh"
+resolve_config "$@"
+interval="${SYNC_INTERVAL:-60}"
+
+run_cli() {
+    if [[ -n "${LIVESYNC_CLI_CMD:-}" ]]; then
+        $LIVESYNC_CLI_CMD "$@"
+    else
+        node "$UPSTREAM_DIR/src/apps/cli/dist/index.cjs" "$@"
+    fi
+}
+
+while true; do
+    echo "[INFO] $(date -u +%FT%TZ) pull cycle: sync + mirror"
+    if ! run_cli "$VAULT_DIR" sync; then
+        echo "[WARN] sync cycle failed; retrying next interval" >&2
+    else
+        run_cli "$VAULT_DIR" mirror
+    fi
+    sleep "$interval"
+done
+```
+
+```bash
+chmod +x scripts/install.sh scripts/readonly-loop.sh
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `bash tests/test-install.sh && make test`
-Expected: PASS (`-- 7 passed, 0 failed`)
+Expected: PASS (`-- 13 passed, 0 failed`)
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/install.sh tests/test-install.sh
-git commit -m "feat: install with secret prompts, preflight sync gate, upstream installer"
+git add scripts/install.sh scripts/readonly-loop.sh tests/test-install.sh
+git commit -m "feat: install with preflight gate, upstream installer, and read-only branch"
 ```
 
 ---
@@ -1071,15 +1186,239 @@ git commit -m "feat: update workflow with pin-diff guard, reinstall and verify"
 
 ---
 
-### Task 7: Makefile targets
+### Task 7: Read-only guard script + pull-once
+
+**Files:**
+- Create: `scripts/couchdb-readonly.sh`, `scripts/pull-once.sh`, `tests/test-readonly.sh`
+- Test: `tests/test-readonly.sh`
+
+**Interfaces:**
+- Consumes: `resolve_config` (Task 1), `create_settings` (Task 2), settings at `$VAULT_DIR/.livesync/settings.json` (Task 4)
+- Produces:
+  - `couchdb-readonly.sh on|off` — `on`: PUTs `_design/__livesync_readonly_guard` (idempotent: fetches current `_rev` first) with a `validate_doc_update` rejecting all writes from non-admin users; `off`: DELETEs the guard (exit 0 if absent). Admin creds from `COUCHDB_ADMIN_USER`/`COUCHDB_ADMIN_PASSWORD` (prompted if unset and tty, error otherwise). HTTP via `${CURL_CMD:-curl}`. `REMAINING_ARGS[0]` carries the subcommand (flags like `--vault` are consumed by `resolve_config`).
+  - `pull-once.sh` — one `sync` + `mirror` cycle, honours `LIVESYNC_CLI_CMD`.
+
+- [ ] **Step 1: Write the failing test**
+
+Create `tests/test-readonly.sh`:
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib.sh"
+source "$SCRIPT_DIR/../scripts/lib/config.sh"
+source "$SCRIPT_DIR/../scripts/lib/settings.sh"
+
+vault="$TEST_TMP/vault"
+COUCHDB_URI="http://127.0.0.1:15984" COUCHDB_DBNAME="testdb" \
+COUCHDB_USER="reader" COUCHDB_PASSWORD="readerpass" \
+E2E_PASSPHRASE="e" OBFUSCATE_PASSPHRASE="o" \
+    create_settings "$vault/.livesync/settings.json"
+
+# curl stub: logs args; GET returns $GET_BODY, others return {"ok":true}
+export CURL_LOG="$TEST_TMP/curl.log"
+export GET_BODY='{"_id":"_design/__livesync_readonly_guard","_rev":"2-abc"}'
+cat > "$TEST_TMP/curl.sh" <<'EOS'
+#!/usr/bin/env bash
+echo "curl: $*" >> "${CURL_LOG:?}"
+for a in "$@"; do
+    if [[ "$prev" == "-u" ]]; then echo "curl-auth: $a" >> "$CURL_LOG"; fi
+    prev="$a"
+done
+if [[ "${1:-}" == "-sf" ]]; then echo "$GET_BODY"; else echo '{"ok":true}'; fi
+EOS
+chmod +x "$TEST_TMP/curl.sh"
+
+run_guard() {
+    VAULT_DIR="$vault" REPO_DIR="$SCRIPT_DIR/.." \
+    COUCHDB_ADMIN_USER="admin" COUCHDB_ADMIN_PASSWORD="adminpass" \
+    CURL_CMD="bash $TEST_TMP/curl.sh" \
+        bash "$SCRIPT_DIR/../scripts/couchdb-readonly.sh" "$@"
+}
+
+# 1. Review Focus: on -> PUT guard doc with validate_doc_update and rev
+: > "$CURL_LOG"
+assert_exit_code 0 run_guard on
+assert_file_contains "$CURL_LOG" "-X PUT" "guard uses PUT"
+assert_file_contains "$CURL_LOG" "__livesync_readonly_guard" "targets the guard doc id"
+assert_file_contains "$CURL_LOG" "validate_doc_update" "body contains the validator"
+assert_file_contains "$CURL_LOG" "curl-auth: admin:" "uses admin credentials"
+
+# 2. off (rev present) -> DELETE with rev
+: > "$CURL_LOG"
+assert_exit_code 0 run_guard off
+assert_file_contains "$CURL_LOG" "-X DELETE" "off uses DELETE"
+assert_file_contains "$CURL_LOG" "rev=2-abc" "off passes the current rev"
+
+# 3. off (guard absent) -> clean exit, no DELETE
+export GET_BODY='{"error":"not_found"}'
+: > "$CURL_LOG"
+assert_exit_code 0 run_guard off
+if grep -q -- "-X DELETE" "$CURL_LOG"; then fail "no DELETE when guard absent"; else ok "no DELETE when guard absent"; fi
+
+# 4. bad subcommand -> usage error
+assert_exit_code 1 run_guard nonsense
+ok "rejects unknown subcommand"
+
+# 5. pull-once runs sync then mirror via the CLI
+export CLI_LOG="$TEST_TMP/cli.log"; : > "$CLI_LOG"
+cat > "$TEST_TMP/cli.sh" <<'EOS'
+#!/usr/bin/env bash
+echo "cli: $*" >> "${CLI_LOG:?}"
+exit 0
+EOS
+chmod +x "$TEST_TMP/cli.sh"
+assert_exit_code 0 env VAULT_DIR="$vault" REPO_DIR="$SCRIPT_DIR/.." \
+    LIVESYNC_CLI_CMD="bash $TEST_TMP/cli.sh" \
+    UPSTREAM_DIR="$TEST_TMP/up" bash "$SCRIPT_DIR/../scripts/pull-once.sh"
+assert_file_contains "$CLI_LOG" "sync" "pull-once runs sync"
+assert_file_contains "$CLI_LOG" "mirror" "pull-once runs mirror"
+
+finish
+```
+
+Note: in check 5, `env` works because it prefixes the external `bash` invocation, not a function.
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `bash tests/test-readonly.sh`
+Expected: FAIL — `scripts/couchdb-readonly.sh: No such file or directory`
+
+- [ ] **Step 3: Write minimal implementation**
+
+Create `scripts/couchdb-readonly.sh`:
+
+```bash
+#!/usr/bin/env bash
+# Install/remove the CouchDB write guard used by READ_ONLY test mode.
+# Usage: couchdb-readonly.sh on|off [--vault <path>]
+# Admin credentials from COUCHDB_ADMIN_USER / COUCHDB_ADMIN_PASSWORD (prompted if unset).
+set -euo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/config.sh"
+resolve_config "$@"
+
+action="${REMAINING_ARGS[0]:-}"
+if [[ "$action" != "on" && "$action" != "off" ]]; then
+    echo "Usage: $0 on|off" >&2
+    exit 1
+fi
+
+settings="$VAULT_DIR/.livesync/settings.json"
+if [[ ! -f "$settings" ]]; then
+    echo "Error: $settings not found - run install first" >&2
+    exit 1
+fi
+
+require_admin() {
+    if [[ -z "${COUCHDB_ADMIN_USER:-}" || ${#COUCHDB_ADMIN_PASSWORD} -eq 0 ]]; then
+        if [[ -t 0 ]]; then
+            [[ -z "${COUCHDB_ADMIN_USER:-}" ]] && read -rp "CouchDB admin user: " COUCHDB_ADMIN_USER
+            [[ ${#COUCHDB_ADMIN_PASSWORD} -eq 0 ]] && read -rsp "CouchDB admin password: " COUCHDB_ADMIN_PASSWORD >&2 && echo >&2
+            export COUCHDB_ADMIN_USER COUCHDB_ADMIN_PASSWORD
+        else
+            echo "Error: COUCHDB_ADMIN_USER / COUCHDB_ADMIN_PASSWORD not set and stdin is not a terminal." >&2
+            exit 1
+        fi
+    fi
+}
+
+read -r db_url db_name < <(SETTINGS_TARGET="$settings" node <<'NODE'
+const s = JSON.parse(require("fs").readFileSync(process.env.SETTINGS_TARGET, "utf8"));
+console.log(s.couchDB_URI.replace(/\/$/, ""), s.couchDB_DBNAME);
+NODE
+)
+
+curl_cmd="${CURL_CMD:-curl}"
+auth="$COUCHDB_ADMIN_USER:$COUCHDB_ADMIN_PASSWORD"
+guard_url="$db_url/$db_name/_design/__livesync_readonly_guard"
+
+guard_rev() { # echoes current _rev, or empty if absent
+    local body
+    body=$($curl_cmd -sf -u "$auth" "$guard_url" 2>/dev/null || true)
+    if [[ -n "$body" ]]; then
+        echo "$body" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{try{const j=JSON.parse(d);console.log(j._rev||"")}catch(e){console.log("")}})'
+    fi
+}
+
+require_admin
+
+if [[ "$action" == "on" ]]; then
+    rev="$(guard_rev)"
+    body="$(GUARD_REV="$rev" node <<'NODE'
+const doc = {
+    _id: "_design/__livesync_readonly_guard",
+    validate_doc_update: "function (newDoc, oldDoc, userCtx) { if (userCtx.roles.indexOf('_admin') !== -1) return; throw { forbidden: 'read-only guard active' }; }"
+};
+if (process.env.GUARD_REV) doc._rev = process.env.GUARD_REV;
+console.log(JSON.stringify(doc));
+NODE
+)"
+    $curl_cmd -sf -u "$auth" -X PUT -H 'Content-Type: application/json' -d "$body" "$guard_url" >/dev/null
+    echo "[INFO] Read-only guard ON: non-admin writes to $db_name are now rejected."
+    echo "       WARNING: this blocks ALL non-admin writers, including other devices."
+else
+    rev="$(guard_rev)"
+    if [[ -z "$rev" ]]; then
+        echo "[INFO] Guard already absent from $db_name."
+        exit 0
+    fi
+    $curl_cmd -sf -u "$auth" -X DELETE "$guard_url?rev=$rev" >/dev/null
+    echo "[INFO] Read-only guard OFF: writes to $db_name are allowed again."
+fi
+```
+
+Create `scripts/pull-once.sh`:
+
+```bash
+#!/usr/bin/env bash
+# One read-only pull cycle: sync (remote -> local db) + mirror (db -> fs).
+set -euo pipefail
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/lib/config.sh"
+resolve_config "$@"
+
+run_cli() {
+    if [[ -n "${LIVESYNC_CLI_CMD:-}" ]]; then
+        $LIVESYNC_CLI_CMD "$@"
+    else
+        node "$UPSTREAM_DIR/src/apps/cli/dist/index.cjs" "$@"
+    fi
+}
+
+run_cli "$VAULT_DIR" sync
+run_cli "$VAULT_DIR" mirror
+echo "[INFO] pull-once complete"
+```
+
+```bash
+chmod +x scripts/couchdb-readonly.sh scripts/pull-once.sh
+```
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `bash tests/test-readonly.sh && make test`
+Expected: PASS (`-- 8 passed, 0 failed`)
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/couchdb-readonly.sh scripts/pull-once.sh tests/test-readonly.sh
+git commit -m "feat: CouchDB write guard and pull-once for read-only testing"
+```
+
+---
+
+### Task 8: Makefile targets
 
 **Files:**
 - Modify: `Makefile`
 - Test: `tests/test-makefile.sh`
 
 **Interfaces:**
-- Consumes: all scripts (Tasks 3–6)
-- Produces: targets `bootstrap`, `install`, `update`, `status`, `verify`, `test`, `test-e2e-local`; each target forwards to the corresponding script (env vars pass through: `make install VAULT_DIR=/path`)
+- Consumes: all scripts (Tasks 3–7)
+- Produces: targets `bootstrap`, `install`, `update`, `status`, `verify`, `test`, `test-e2e-local`, `pull-once`, `readonly-on`, `readonly-off`; each target forwards to the corresponding script (env vars pass through: `make install VAULT_DIR=/path`)
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1094,16 +1433,18 @@ source "$SCRIPT_DIR/lib.sh"
 makefile="$SCRIPT_DIR/../Makefile"
 
 # 1. all targets exist
-for t in bootstrap install update status verify test test-e2e-local; do
+for t in bootstrap install update status verify test test-e2e-local pull-once readonly-on readonly-off; do
     assert_file_contains "$makefile" "$t:" "Makefile has target: $t"
 done
 
 # 2. .PHONY line present (so targets always run)
 assert_file_contains "$makefile" ".PHONY:" "Makefile marks targets phony"
 
-# 3. targets forward to scripts (spot-check two)
+# 3. targets forward to scripts (spot-checks)
 assert_file_contains "$makefile" "scripts/bootstrap.sh" "bootstrap target runs script"
 assert_file_contains "$makefile" "scripts/verify.sh" "verify target runs script"
+assert_file_contains "$makefile" "scripts/pull-once.sh" "pull-once target runs script"
+assert_file_contains "$makefile" "scripts/couchdb-readonly.sh on" "readonly-on runs guard script"
 
 finish
 ```
@@ -1111,14 +1452,14 @@ finish
 - [ ] **Step 2: Run test to verify it fails**
 
 Run: `bash tests/test-makefile.sh`
-Expected: FAIL — missing targets (`update:` etc. not in Makefile)
+Expected: FAIL — missing targets (`pull-once:` etc. not in Makefile)
 
 - [ ] **Step 3: Write minimal implementation**
 
 Replace `Makefile` content with:
 
 ```make
-.PHONY: bootstrap install update status verify test test-e2e-local
+.PHONY: bootstrap install update status verify test test-e2e-local pull-once readonly-on readonly-off
 
 bootstrap:
 	@bash scripts/bootstrap.sh $(ARGS)
@@ -1141,23 +1482,32 @@ test:
 
 test-e2e-local:
 	@bash scripts/test-e2e-local.sh
+
+pull-once:
+	@bash scripts/pull-once.sh $(ARGS)
+
+readonly-on:
+	@bash scripts/couchdb-readonly.sh on
+
+readonly-off:
+	@bash scripts/couchdb-readonly.sh off
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `bash tests/test-makefile.sh && make test`
-Expected: PASS (`-- 3 passed, 0 failed`)
+Expected: PASS (`-- 4 passed, 0 failed`)
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add Makefile tests/test-makefile.sh
-git commit -m "feat: Makefile targets for all lifecycle operations"
+git commit -m "feat: Makefile targets for all lifecycle operations incl. read-only"
 ```
 
 ---
 
-### Task 8: Local e2e test (Docker CouchDB, two vaults)
+### Task 9: Local e2e test (Docker CouchDB, two vaults)
 
 **Files:**
 - Create: `scripts/test-e2e-local.sh`
@@ -1193,6 +1543,9 @@ fi
 
 COUCH_PORT=15984
 COUCH_NAME=livesync-headless-e2e
+# Synthetic throwaway credentials for the local container only.
+COUCH_ADMIN="admin"
+COUCH_ADMIN_PW="testpass-e2e"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/livesync-e2e.XXXXXX")"
 cleanup() {
     [[ -n "${DAEMON_PID:-}" ]] && kill "$DAEMON_PID" 2>/dev/null || true
@@ -1203,17 +1556,17 @@ trap cleanup EXIT
 
 echo "[INFO] Starting CouchDB container..."
 docker run -d --rm --name "$COUCH_NAME" -p "$COUCH_PORT:5984" \
-    -e COUCHDB_USER=admin -e COUCHDB_PASSWORD=testpass-e2e couchdb:3 >/dev/null
+    -e COUCHDB_USER="$COUCH_ADMIN" -e COUCHDB_PASSWORD="$COUCH_ADMIN_PW" couchdb:3 >/dev/null
 
 echo "[INFO] Waiting for CouchDB..."
 for i in $(seq 1 60); do
-    if curl -sf "http://admin:testpass-e2e@127.0.0.1:$COUCH_PORT/" >/dev/null 2>&1; then break; fi
+    if curl -sf -u "$COUCH_ADMIN:$COUCH_ADMIN_PW" "http://127.0.0.1:$COUCH_PORT/" >/dev/null 2>&1; then break; fi
     sleep 1
 done
-curl -sf -X POST "http://admin:testpass-e2e@127.0.0.1:$COUCH_PORT/_cluster_setup" \
+curl -sf -u "$COUCH_ADMIN:$COUCH_ADMIN_PW" -X POST "http://127.0.0.1:$COUCH_PORT/_cluster_setup" \
     -H 'Content-Type: application/json' -d '{"action":"enable_single_node"}' >/dev/null \
     || { echo "FAIL: could not initialise CouchDB single node" >&2; exit 1; }
-curl -sf -X PUT "http://admin:testpass-e2e@127.0.0.1:$COUCH_PORT/obsidian-livesync-e2e" >/dev/null \
+curl -sf -u "$COUCH_ADMIN:$COUCH_ADMIN_PW" -X PUT "http://127.0.0.1:$COUCH_PORT/obsidian-livesync-e2e" >/dev/null \
     || { echo "FAIL: could not create test database" >&2; exit 1; }
 
 mk_vault() { # $1 = dir
@@ -1222,8 +1575,8 @@ mk_vault() { # $1 = dir
 {
     "couchDB_URI": "http://127.0.0.1:$COUCH_PORT",
     "couchDB_DBNAME": "obsidian-livesync-e2e",
-    "couchDB_USER": "admin",
-    "couchDB_PASSWORD": "testpass-e2e",
+    "couchDB_USER": "$COUCH_ADMIN",
+    "couchDB_PASSWORD": "$COUCH_ADMIN_PW",
     "encrypt": true,
     "passphrase": "e2e-local-secret",
     "usePathObfuscation": true,
@@ -1297,7 +1650,7 @@ git commit -m "feat: local e2e test with throwaway CouchDB and two vaults"
 
 ---
 
-### Task 9: README runbook
+### Task 10: README runbook
 
 **Files:**
 - Create: `README.md`
@@ -1333,6 +1686,11 @@ own CLI (`self-hosted-livesync-cli`), pinned and wrapped by this repo.
     E2E_PASSPHRASE=... OBFUSCATE_PASSPHRASE=... \
         make install VAULT_DIR=/srv/vault
 
+    # Alternative: apply the plugin's Setup URI instead of manual secrets
+    # (carries E2E + obfuscation settings automatically):
+    ~/opt/obsidian-livesync/src/apps/cli/dist/index.cjs ~/vault \
+        setup "obsidian://setuplivesync?..." && make install
+
     make verify                     # healthcheck
 
 ## Where things live
@@ -1361,6 +1719,31 @@ Both are stored only in the gitignored `settings.json`.
   chokidar file watching (instant local -> remote).
 - Behind a proxy that kills long-lived connections? Set `SYNC_INTERVAL=30`
   (seconds) in `config/env.local` and re-run `make install`.
+
+## Read-only mode (testing against a real database)
+
+Test the whole setup against your real CouchDB with a hard guarantee that
+nothing on the server can ever write to the remote database.
+
+    # 1. Create a NON-ADMIN CouchDB member user (one-off, in CouchDB):
+    #    e.g. put the user in the database members, not in _admin
+    # 2. Turn the write guard ON (admin creds, prompted; blocks ALL non-admin writers):
+    make readonly-on
+    # 3. Install in read-only mode (uses config/env.local: READ_ONLY=1, SYNC_INTERVAL=60):
+    READ_ONLY=1 make install VAULT_DIR=/srv/vault-test
+    # 4. Pull once on demand, or let livesync-readonly.service keep it fresh:
+    make pull-once
+    # 5. When done testing:
+    make readonly-off
+
+Notes:
+- The guard is a CouchDB design doc (`_design/__livesync_readonly_guard`) whose
+  validator rejects every write from non-admin users. Reads and the _changes
+  feed are unaffected.
+- While the guard is ON, ALL non-admin writers are blocked - including your
+  other devices if they use non-admin credentials. Turn it off when done.
+- Read-only sync is additive: it never deletes local files (upstream mirror
+  semantics restore DB-only files).
 
 ## Daily operations
 
