@@ -48,7 +48,7 @@ SETTINGS_TARGET="$TMP_DB/.livesync/settings.json" node <<'NODE'
 const fs = require("fs");
 const s = JSON.parse(fs.readFileSync(process.env.SETTINGS_TARGET, "utf8"));
 const interesting = [
-    "couchDB_URI", "couchDB_DBNAME", "encrypt", "usePathObfuscation",
+    "encrypt", "usePathObfuscation",
     "customChunkSize", "usePluginSyncV2", "handleFilenameCaseSensitive", "isConfigured",
 ];
 console.log("OK: URI parsed and decrypted. Settings it carries:");
@@ -56,4 +56,12 @@ for (const k of interesting) {
     if (k in s) console.log(`  ${k}: ${s[k]}`);
 }
 if (!("customChunkSize" in s)) console.log("  customChunkSize: (absent -> 0/default)");
+const remotes = Object.keys(s.remoteConfigurations || {});
+if (remotes.length) {
+    console.log(`  remote configurations: ${remotes.join(", ")} (active: ${s.activeConfigurationId || "n/a"})`);
+    console.log("  (connection details are stored encrypted as an sls+ URI)");
+} else if (s.couchDB_URI) {
+    console.log(`  couchDB_URI: ${s.couchDB_URI}`);
+    console.log(`  couchDB_DBNAME: ${s.couchDB_DBNAME}`);
+}
 NODE
