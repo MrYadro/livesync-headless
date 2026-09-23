@@ -1,4 +1,5 @@
+.DS_Store
+.livesync/
 config/env.local
 config/settings.json
 settings.json
-.livesync/
