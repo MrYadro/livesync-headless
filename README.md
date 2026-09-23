@@ -26,6 +26,10 @@ own CLI (`self-hosted-livesync-cli`), pinned and wrapped by this repo.
     make import-uri URI='obsidian://setuplivesync?...'
     make install     # settings exist; preflight + service installation run
 
+    # Or first just inspect what a Setup URI carries (throwaway parse,
+    # nothing is applied, real vault untouched):
+    make check-uri URI='obsidian://setuplivesync?...'
+
     make verify                     # healthcheck
 
 ## Where things live

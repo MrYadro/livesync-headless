@@ -6,7 +6,7 @@ source "$SCRIPT_DIR/lib.sh"
 makefile="$SCRIPT_DIR/../Makefile"
 
 # 1. all targets exist
-for t in bootstrap install update status verify test test-e2e-local pull-once readonly-on readonly-off import-uri; do
+for t in bootstrap install update status verify test test-e2e-local pull-once readonly-on readonly-off import-uri check-uri; do
     assert_file_contains "$makefile" "$t:" "Makefile has target: $t"
 done
 

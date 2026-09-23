@@ -1,4 +1,4 @@
-.PHONY: bootstrap install update status verify test test-e2e-local pull-once readonly-on readonly-off import-uri
+.PHONY: bootstrap install update status verify test test-e2e-local pull-once readonly-on readonly-off import-uri check-uri
 
 bootstrap:
 	@bash scripts/bootstrap.sh $(ARGS)
@@ -33,3 +33,6 @@ readonly-off:
 
 import-uri:
 	@bash scripts/import-uri.sh $(URI)
+
+check-uri:
+	@bash scripts/check-uri.sh $(URI)
