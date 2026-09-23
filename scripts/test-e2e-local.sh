@@ -56,7 +56,6 @@ mk_vault() { # $1 = dir
     "encrypt": true,
     "passphrase": "e2e-local-secret",
     "usePathObfuscation": true,
-    "obfuscatePassphrase": "obf-local-secret",
     "liveSync": true,
     "syncOnSave": true,
     "syncOnStart": true,

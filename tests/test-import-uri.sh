@@ -28,7 +28,6 @@ cat > "$SETTINGS_TO_WRITE" <<'EOT'
     "encrypt": true,
     "passphrase": "imported-e2e",
     "usePathObfuscation": true,
-    "obfuscatePassphrase": "imported-obf",
     "liveSync": true,
     "syncOnSave": true,
     "syncOnStart": true,

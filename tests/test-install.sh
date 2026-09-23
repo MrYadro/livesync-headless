@@ -29,7 +29,7 @@ run_install() {
     VAULT_DIR="$vault" UPSTREAM_DIR="$clone" REPO_DIR="$SCRIPT_DIR/.." \
     COUCHDB_URI="http://127.0.0.1:15984" COUCHDB_DBNAME="testdb" \
     COUCHDB_USER="reader" COUCHDB_PASSWORD="readerpass" \
-    E2E_PASSPHRASE="e" OBFUSCATE_PASSPHRASE="o" \
+    E2E_PASSPHRASE="e" \
     SKIP_BOOTSTRAP=1 LIVESYNC_CLI_CMD="bash $TEST_TMP/stub-cli.sh" \
         bash "$SCRIPT_DIR/../scripts/install.sh"
 }
@@ -51,7 +51,7 @@ T="$vault/.livesync/settings.json" assert_exit_code 0 node -e '
     process.exit(s.isConfigured === true ? 0 : 1);
 ' && ok "isConfigured set to true"
 
-# 2. obfuscation passphrase defaults to the E2E passphrase when not provided
+# 2. no separate obfuscation passphrase: settings carry only the E2E passphrase
 vault_def="$TEST_TMP/vault-default-obf"
 : > "$INSTALL_LOG"; : > "$cli_log"
 rc=0
@@ -65,8 +65,8 @@ LIVESYNC_CLI_CMD="bash $TEST_TMP/stub-cli.sh" \
 assert_eq "$rc" "0" "install succeeds without OBFUSCATE_PASSPHRASE"
 T="$vault_def/.livesync/settings.json" assert_exit_code 0 node -e '
     const s = JSON.parse(require("fs").readFileSync(process.env.T, "utf8"));
-    process.exit(s.obfuscatePassphrase === s.passphrase && s.passphrase === "shared-secret" ? 0 : 1);
-' && ok "obfuscation passphrase defaults to E2E passphrase"
+    process.exit(s.passphrase === "shared-secret" && !("obfuscatePassphrase" in s) ? 0 : 1);
+' && ok "single passphrase; no dead obfuscatePassphrase key"
 
 # 3. installer NOT called again when settings already exist (idempotent config step)
 #    (sentinel is a JSON-safe extra key: settings must stay parseable for the sanity check)
@@ -105,7 +105,7 @@ vault_bad="$TEST_TMP/vault-bad"
 VAULT_DIR="$vault_bad" REPO_DIR="$SCRIPT_DIR/.." \
 COUCHDB_URI="http://127.0.0.1:15984" COUCHDB_DBNAME="testdb" \
 COUCHDB_USER="admin" COUCHDB_PASSWORD="install-test-password" \
-E2E_PASSPHRASE="e" OBFUSCATE_PASSPHRASE="o" \
+E2E_PASSPHRASE="e" \
     create_settings "$vault_bad/.livesync/settings.json" >/dev/null
 sed -i.bak 's/"usePathObfuscation": true/"usePathObfuscation": false/' "$vault_bad/.livesync/settings.json"
 : > "$INSTALL_LOG"; : > "$cli_log"
@@ -140,7 +140,7 @@ VAULT_DIR="$vault_ro" UPSTREAM_DIR="$clone" REPO_DIR="$SCRIPT_DIR/.." \
 SKIP_BOOTSTRAP=1 READ_ONLY=1 \
 COUCHDB_URI="http://127.0.0.1:15984" COUCHDB_DBNAME="testdb" \
 COUCHDB_USER="reader" COUCHDB_PASSWORD="readerpass" \
-E2E_PASSPHRASE="e" OBFUSCATE_PASSPHRASE="o" \
+E2E_PASSPHRASE="e" \
 LIVESYNC_CLI_CMD="bash $TEST_TMP/stub-cli.sh" \
 CURL_CMD="bash $TEST_TMP/curl.sh" \
 SYSTEMCTL_CMD="bash $TEST_TMP/systemctl-ro.sh" \

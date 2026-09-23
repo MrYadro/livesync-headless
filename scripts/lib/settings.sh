@@ -20,7 +20,6 @@ if (env.COUCHDB_DBNAME) s.couchDB_DBNAME = env.COUCHDB_DBNAME;
 if (env.COUCHDB_USER) s.couchDB_USER = env.COUCHDB_USER;
 if (env.COUCHDB_PASSWORD) s.couchDB_PASSWORD = env.COUCHDB_PASSWORD;
 if (env.E2E_PASSPHRASE) s.passphrase = env.E2E_PASSPHRASE;
-if (env.OBFUSCATE_PASSPHRASE) s.obfuscatePassphrase = env.OBFUSCATE_PASSPHRASE;
 s.isConfigured = true;
 fs.writeFileSync(process.env.SETTINGS_TARGET, JSON.stringify(s, null, 4) + "\n");
 NODE

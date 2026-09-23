@@ -6,7 +6,6 @@
     "encrypt": true,
     "passphrase": "",
     "usePathObfuscation": true,
-    "obfuscatePassphrase": "",
     "liveSync": true,
     "syncOnSave": true,
     "syncOnStart": true,

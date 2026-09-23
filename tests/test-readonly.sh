@@ -8,7 +8,7 @@ source "$SCRIPT_DIR/../scripts/lib/settings.sh"
 vault="$TEST_TMP/vault"
 COUCHDB_URI="http://127.0.0.1:15984" COUCHDB_DBNAME="testdb" \
 COUCHDB_USER="reader" COUCHDB_PASSWORD="readerpass" \
-E2E_PASSPHRASE="e" OBFUSCATE_PASSPHRASE="o" \
+E2E_PASSPHRASE="e" \
     create_settings "$vault/.livesync/settings.json"
 
 # curl stub: logs args; GET (no -X) exits ${GET_RC:-0} with -w http code line

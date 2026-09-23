@@ -97,7 +97,6 @@ The vault path is configurable — never hard-coded. Resolution order (highest w
     "encrypt": true,
     "passphrase": "",
     "usePathObfuscation": true,
-    "obfuscatePassphrase": "",
     "liveSync": true,
     "syncOnSave": true,
     "syncOnStart": true,
@@ -105,7 +104,7 @@ The vault path is configurable — never hard-coded. Resolution order (highest w
 }
 ```
 
-- `install.sh` fills secrets interactively (or from environment variables `COUCHDB_USER`, `COUCHDB_PASSWORD`, `E2E_PASSPHRASE`, `OBFUSCATE_PASSPHRASE`) into the server-local `settings.json`; that file is world-unreadable (0600) and never committed
+- `install.sh` fills secrets interactively (or from environment variables `COUCHDB_USER`, `COUCHDB_PASSWORD`, `E2E_PASSPHRASE`) into the server-local `settings.json`; that file is world-unreadable (0600) and never committed. Amendment (verified in upstream `PathService.js:55`): the obfuscation passphrase is always derived from `passphrase` when `usePathObfuscation` is on — the `obfuscatePassphrase` settings key is dead legacy and is not written.
 - Alternative: apply a plugin Setup URI via `scripts/import-uri.sh "<uri>"` (`make import-uri URI=...`) — handles the URI's **passphrase protection**: passphrase from `SETUP_URI_PASSPHRASE` env (prompted on tty, hard error non-tty), piped to the CLI `setup` command on stdin; after import the script enforces `settings.json` mode 0600 and the same sanity checks as `verify.sh` (`isConfigured`, `usePathObfuscation`, `encrypt` unless `ALLOW_PLAINTEXT=1`). The URI carries E2E + obfuscation settings automatically.
 - Constraints documented in README:
   - E2E passphrase and obfuscation passphrase **must match the other devices**; the obfuscation passphrase is baked into existing document IDs — a mismatched value produces broken sync, not an error

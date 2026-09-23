@@ -39,9 +39,6 @@ if [[ ! -f "$settings" ]]; then
     require_secret COUCHDB_USER "CouchDB user"
     require_secret COUCHDB_PASSWORD "CouchDB password"
     require_secret E2E_PASSPHRASE "E2E passphrase (must match your other devices)"
-    # Current plugin versions use the E2E passphrase for path obfuscation too
-    # (single passphrase in the UI). OBFUSCATE_PASSPHRASE overrides legacy setups.
-    export OBFUSCATE_PASSPHRASE="${OBFUSCATE_PASSPHRASE:-$E2E_PASSPHRASE}"
     create_settings "$settings"
 fi
 

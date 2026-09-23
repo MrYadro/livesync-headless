@@ -10,17 +10,18 @@ target="$TEST_TMP/.livesync/settings.json"
 # 1. create_settings fills env secrets, sets isConfigured, keeps E2E+obfuscation on
 #    (expected values are read back from the same env vars - no literal comparison)
 export COUCHDB_URI="http://127.0.0.1:15984" COUCHDB_DBNAME="testdb" COUCHDB_USER="admin" \
-    COUCHDB_PASSWORD="testpass-e2e" E2E_PASSPHRASE="e2e-secret" OBFUSCATE_PASSPHRASE="obf-secret"
+    COUCHDB_PASSWORD="testpass-e2e" E2E_PASSPHRASE="e2e-secret"
 create_settings "$target"
 
 T="$target" assert_exit_code 0 node -e '
     const s = JSON.parse(require("fs").readFileSync(process.env.T, "utf8"));
     const want = {couchDB_URI: process.env.COUCHDB_URI, couchDB_DBNAME: process.env.COUCHDB_DBNAME,
         couchDB_USER: process.env.COUCHDB_USER, couchDB_PASSWORD: process.env.COUCHDB_PASSWORD,
-        passphrase: process.env.E2E_PASSPHRASE, obfuscatePassphrase: process.env.OBFUSCATE_PASSPHRASE,
+        passphrase: process.env.E2E_PASSPHRASE,
         isConfigured: true, encrypt: true, usePathObfuscation: true};
     for (const k in want) if (s[k] !== want[k]) { console.error("mismatch: " + k); process.exit(1); }
-' && ok "create_settings fills secrets and flags"
+    if ("obfuscatePassphrase" in s) { console.error("dead key obfuscatePassphrase written"); process.exit(1); }
+' && ok "create_settings fills secrets, flags on, no dead obfuscatePassphrase key"
 
 # 2. Review Focus: settings file mode 0600
 mode=$(stat -f '%Lp' "$target" 2>/dev/null || stat -c '%a' "$target")
